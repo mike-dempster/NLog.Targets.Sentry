@@ -127,19 +127,25 @@ namespace NLog.Targets
         {
             try
             {
-                var tags = this.SendLogEventInfoPropertiesAsTags
-                               ? logEvent.Properties.ToDictionary(x => x.Key.ToString(), x => x.Value.ToString())
-                               : null;
+                if (logEvent.Exception == null && this.IgnoreEventsWithNoException)
+                {
+                    return;
+                }
 
-                var extras = this.SendLogEventInfoPropertiesAsTags
-                                 ? null
-                                 : logEvent.Properties.ToDictionary(x => x.Key.ToString(), x => x.Value.ToString());
+                Dictionary<string, string> eventProperties = null;
+                if (logEvent.HasProperties)
+                {
+                    eventProperties = logEvent.Properties.ToDictionary(x => x.Key.ToString(), x => x.Value.ToString());
+                }
+
+                var tags = this.SendLogEventInfoPropertiesAsTags ? eventProperties : null;
+                var extras = this.SendLogEventInfoPropertiesAsTags ? null : eventProperties;
 
                 this.client.Value.Logger = logEvent.LoggerName;
 
                 // If the log event did not contain an exception and we're not ignoring
                 // those kinds of events then we'll send a "Message" to Sentry
-                if (logEvent.Exception == null && !this.IgnoreEventsWithNoException)
+                if (logEvent.Exception == null)
                 {
                     var sentryMessage = new SentryMessage(this.Layout.Render(logEvent));
                     var msg = new SentryEvent(sentryMessage)
@@ -148,24 +154,31 @@ namespace NLog.Targets
                         Extra = extras,
                         Tags = tags
                     };
-                    this.client.Value.Capture(msg);
+                    if (this.client.Value.Capture(msg)==null)
+                    {
+                        throw new InvalidOperationException("RavenClient Failed to capture LogEvent. See NLog InternalLog for more details.");
+                    }
                 }
-                else if (logEvent.Exception != null)
+                else
                 {
                     var sentryMessage = new SentryMessage(logEvent.FormattedMessage);
                     var sentryEvent = new SentryEvent(logEvent.Exception)
                     {
-                        Extra = extras,
-                        Level = LoggingLevelMap[logEvent.Level],
                         Message = sentryMessage,
+                        Level = LoggingLevelMap[logEvent.Level],
+                        Extra = extras,
                         Tags = tags
                     };
-                    this.client.Value.Capture(sentryEvent);
+                    if (this.client.Value.Capture(sentryEvent)==null)
+                    {
+                        throw new InvalidOperationException("RavenClient Failed to capture LogEvent. See NLog InternalLog for more details.");
+                    }
                 }
             }
             catch (Exception ex)
             {
                 this.LogException(ex);
+                throw;  // Notify NLog about failure, so fallback/retry can be performed
             }
         }
 
@@ -221,7 +234,7 @@ namespace NLog.Targets
         /// <param name="ex">The ex to log to the internal logger.</param>
         private void LogException(Exception ex)
         {
-            InternalLogger.Error("Unable to send Sentry request: {0}", ex.Message);
+            InternalLogger.Error(ex, "Unable to send Sentry request: {0}", ex.Message);
         }
     }
 }
